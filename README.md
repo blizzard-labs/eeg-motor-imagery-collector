@@ -2,6 +2,7 @@
 
 A comprehensive React web application designed to assist in the collection of EEG motor imagery and continuous motion data. The app provides visual cues, 3D hand visualization, and webcam-based hand tracking to guide subjects through various motor imagery and execution tasks.
 
+![App UI](img/appui.png)
 
 ## Features
 
@@ -74,8 +75,6 @@ Designed for periodic alternation between neutral and target poses at a fixed fr
 4. Click the **Start Session** button to begin the data collection protocol.
 5. Follow the on-screen visual and audio cues.
 6. Once the session is complete, the recorded data (CSV logs and video) will be available for download.
-
-![App UI](img/appui.png)
 
 ## License
 
