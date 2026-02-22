@@ -120,16 +120,16 @@ const ContinuousMotionMode = () => {
   // Calculate total time per target cycle
   const cycleDuration = settings.preparationDuration + settings.executionDuration + settings.returnCueDuration + settings.restDuration;
   
-  // Get list of enabled pose names (excluding neutral for sequence generation)
+  // Get list of enabled pose names for sequence generation
   const getEnabledPoseNames = useCallback(() => {
-    return POSE_NAMES.filter(name => name !== 'neutral' && enabledPoses[name]);
+    return POSE_NAMES.filter(name => enabledPoses[name]);
   }, [enabledPoses]);
   
-  // Initialize pose sequence — every entry is a non-neutral target pose
+  // Initialize pose sequence — target poses randomly selected from enabled poses
   useEffect(() => {
     if (!sessionStarted) {
-      const availablePoses = getEnabledPoseNames(); // already excludes 'neutral'
-      const pool = availablePoses.length > 0 ? availablePoses : POSE_NAMES.filter(p => p !== 'neutral');
+      const availablePoses = getEnabledPoseNames();
+      const pool = availablePoses.length > 0 ? availablePoses : POSE_NAMES;
       // Generate numTargets+1 with a dummy start so the algorithm has a
       // "previous" pose for its distance logic, then drop the dummy.
       const raw = generatePoseSequence(settings.numTargets + 1, {
@@ -138,8 +138,7 @@ const ContinuousMotionMode = () => {
         largeJumpProbability: 0.12,
         allowedPoses: pool
       });
-      // Ensure no neutral slipped in
-      const sequence = raw.filter(p => p !== 'neutral').slice(0, settings.numTargets);
+      const sequence = raw.slice(0, settings.numTargets);
       setPoseSequence(sequence);
       
       // Hand starts at neutral (rest), first target will be shown during preparation
@@ -809,7 +808,7 @@ const ContinuousMotionMode = () => {
               <button
                 onClick={() => {
                   const noneEnabled = {};
-                  POSE_NAMES.forEach(name => { noneEnabled[name] = name === 'neutral'; });
+                  POSE_NAMES.forEach(name => { noneEnabled[name] = false; });
                   setEnabledPoses(noneEnabled);
                 }}
                 disabled={sessionStarted}
@@ -819,21 +818,19 @@ const ContinuousMotionMode = () => {
               </button>
             </div>
           </div>
-          <p className="text-sm text-gray-500 mb-3">Click poses to enable/disable them for random selection. Neutral is always available as the starting pose.</p>
+          <p className="text-sm text-gray-500 mb-3">Click poses to enable/disable them for random selection. Neutral is also the rest position between trials.</p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {POSE_NAMES.map(poseName => (
               <div 
                 key={poseName}
                 onClick={() => {
-                  if (!sessionStarted && poseName !== 'neutral') {
+                  if (!sessionStarted) {
                     setEnabledPoses(prev => ({ ...prev, [poseName]: !prev[poseName] }));
                   }
                 }}
                 className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
                   poseName === currentPoseName 
                     ? 'border-blue-500 bg-blue-50' 
-                    : poseName === 'neutral'
-                    ? 'border-gray-300 bg-gray-50 cursor-default'
                     : enabledPoses[poseName]
                     ? 'border-green-500 bg-green-50 hover:bg-green-100'
                     : 'border-gray-200 bg-gray-100 opacity-50 hover:opacity-75'
@@ -841,17 +838,15 @@ const ContinuousMotionMode = () => {
               >
                 <div className="flex items-center justify-between">
                   <div className="font-semibold text-sm capitalize">{HAND_POSES[poseName].name}</div>
-                  {poseName !== 'neutral' && (
-                    <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
-                      enabledPoses[poseName] ? 'bg-green-500 border-green-500' : 'border-gray-300'
-                    }`}>
-                      {enabledPoses[poseName] && (
-                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </div>
-                  )}
+                  <div className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
+                    enabledPoses[poseName] ? 'bg-green-500 border-green-500' : 'border-gray-300'
+                  }`}>
+                    {enabledPoses[poseName] && (
+                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
                 </div>
                 <div className="text-xs text-gray-500">{HAND_POSES[poseName].description}</div>
               </div>
