@@ -8,13 +8,37 @@ import { interpolatePoses } from '../utils/interpolation';
 /**
  * ContinuousMotionMode Component
  * 
- * Data collection mode for continuous hand motion tracking.
- * Displays a virtual hand that transitions between target poses.
+ * Data collection mode for trial-based motor imagery / execution paradigm.
  * 
- * Timeline per target:
- * - Rest/Dwell: 2000ms (current pose held)
- * - Transition to new target: 1200ms (smooth interpolation)
+ * Trial structure per target pose:
+ * 1. Rest           (2s)  — Rest period (hand at neutral)
+ * 2. Preparation Cue (1s)  — Virtual hand demonstrates movement from neutral → target
+ * 3. Execution      (4s)  — User performs and holds the movement
+ * 4. Return Cue     (0.5s) — Virtual hand returns from target → neutral
  */
+
+const PHASE_ORDER = ['rest', 'preparation', 'execution', 'returnCue'];
+
+const PHASE_LABELS = {
+  preparation: 'Preparation – watch the cue',
+  execution: 'Execute – perform & hold',
+  returnCue: 'Return – relax back to neutral',
+  rest: 'Rest',
+};
+
+const PHASE_COLORS = {
+  preparation: 'bg-blue-500',
+  execution: 'bg-green-500',
+  returnCue: 'bg-purple-500',
+  rest: 'bg-gray-500',
+};
+
+const PHASE_BG = {
+  preparation: 'from-blue-50 to-blue-100',
+  execution: 'from-green-50 to-green-100',
+  returnCue: 'from-purple-50 to-purple-100',
+  rest: 'from-gray-50 to-gray-100',
+};
 
 const ContinuousMotionMode = () => {
   // Session state
@@ -28,7 +52,7 @@ const ContinuousMotionMode = () => {
   const [currentJointAngles, setCurrentJointAngles] = useState(getPose('neutral'));
   const [targetJointAngles, setTargetJointAngles] = useState(getPose('neutral'));
   
-  // Phase state: 'rest' (holding pose) or 'transition' (moving to new pose)
+  // Phase state: 'preparation' | 'execution' | 'returnCue' | 'rest'
   const [phase, setPhase] = useState('rest');
   const [phaseProgress, setPhaseProgress] = useState(0); // 0-1 progress within phase
   const [timeInPhase, setTimeInPhase] = useState(0);
@@ -57,8 +81,10 @@ const ContinuousMotionMode = () => {
   
   // Settings
   const [settings, setSettings] = useState({
-    restDuration: 2000, // ms
-    transitionDuration: 1200, // ms
+    preparationDuration: 1000,  // ms – cue: hand moves neutral → target
+    executionDuration: 4000,    // ms – user performs & holds
+    returnCueDuration: 500,     // ms – hand returns target → neutral
+    restDuration: 2000,         // ms – rest at neutral
     numTargets: 50,
     interpolationType: 'minimumJerk',
     showTargetHand: true,
@@ -67,6 +93,17 @@ const ContinuousMotionMode = () => {
   });
   const [showSettings, setShowSettings] = useState(false);
   
+  // Helper: get duration for the given phase name
+  const getPhaseDuration = useCallback((phaseName) => {
+    switch (phaseName) {
+      case 'preparation': return settings.preparationDuration;
+      case 'execution':   return settings.executionDuration;
+      case 'returnCue':   return settings.returnCueDuration;
+      case 'rest':        return settings.restDuration;
+      default:            return 0;
+    }
+  }, [settings]);
+
   // Camera recording state
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const cameraRecorderRef = useRef(null);
@@ -81,29 +118,35 @@ const ContinuousMotionMode = () => {
   });
   
   // Calculate total time per target cycle
-  const cycleDuration = settings.restDuration + settings.transitionDuration;
+  const cycleDuration = settings.preparationDuration + settings.executionDuration + settings.returnCueDuration + settings.restDuration;
   
   // Get list of enabled pose names (excluding neutral for sequence generation)
   const getEnabledPoseNames = useCallback(() => {
     return POSE_NAMES.filter(name => name !== 'neutral' && enabledPoses[name]);
   }, [enabledPoses]);
   
-  // Initialize pose sequence
+  // Initialize pose sequence — every entry is a non-neutral target pose
   useEffect(() => {
     if (!sessionStarted) {
-      const availablePoses = getEnabledPoseNames();
-      const sequence = generatePoseSequence(settings.numTargets, {
-        startPose: 'neutral',
+      const availablePoses = getEnabledPoseNames(); // already excludes 'neutral'
+      const pool = availablePoses.length > 0 ? availablePoses : POSE_NAMES.filter(p => p !== 'neutral');
+      // Generate numTargets+1 with a dummy start so the algorithm has a
+      // "previous" pose for its distance logic, then drop the dummy.
+      const raw = generatePoseSequence(settings.numTargets + 1, {
+        startPose: pool[Math.floor(Math.random() * pool.length)],
         occasionalLargeJump: true,
         largeJumpProbability: 0.12,
-        allowedPoses: availablePoses.length > 0 ? availablePoses : POSE_NAMES.filter(p => p !== 'neutral')
+        allowedPoses: pool
       });
+      // Ensure no neutral slipped in
+      const sequence = raw.filter(p => p !== 'neutral').slice(0, settings.numTargets);
       setPoseSequence(sequence);
       
-      const initialPose = getPose(sequence[0]);
-      setCurrentJointAngles(initialPose);
-      setTargetJointAngles(initialPose);
-      previousPoseRef.current = initialPose;
+      // Hand starts at neutral (rest), first target will be shown during preparation
+      const neutralPose = getPose('neutral');
+      setCurrentJointAngles(neutralPose);
+      setTargetJointAngles(getPose(sequence[0]));
+      previousPoseRef.current = neutralPose;
     }
   }, [sessionStarted, settings.numTargets, getEnabledPoseNames]);
 
@@ -134,7 +177,7 @@ const ContinuousMotionMode = () => {
     
     // Use refs for current values to avoid stale closures
     const currentPhase = phaseRef.current;
-    const currentPhaseDuration = currentPhase === 'rest' ? settings.restDuration : settings.transitionDuration;
+    const currentPhaseDuration = getPhaseDuration(currentPhase);
     
     // Update time in phase
     timeInPhaseRef.current += deltaTime;
@@ -145,10 +188,13 @@ const ContinuousMotionMode = () => {
     const progress = Math.min(newTime / currentPhaseDuration, 1);
     setPhaseProgress(progress);
     
-    // During transition, interpolate pose
-    if (currentPhase === 'transition') {
+    const neutralPose = getPose('neutral');
+    
+    // Phase-specific animation & logging
+    if (currentPhase === 'preparation') {
+      // Interpolate from neutral → target to show the user what to do
       const interpolatedPose = interpolatePoses(
-        previousPoseRef.current,
+        neutralPose,
         targetJointAnglesRef.current,
         progress,
         settings.interpolationType
@@ -163,19 +209,64 @@ const ContinuousMotionMode = () => {
           timestamp,
           interpolatedPose,
           targetJointAnglesRef.current,
-          'transition',
+          'preparation',
+          currentPoseIndexRef.current,
+          poseSequenceRef.current[currentPoseIndexRef.current]
+        );
+      }
+    } else if (currentPhase === 'execution') {
+      // Hold the target pose (hand stays at target so user can mirror it)
+      const targetPose = targetJointAnglesRef.current;
+      setCurrentJointAngles(targetPose);
+      currentJointAnglesRef.current = targetPose;
+      
+      // Log at specified frame rate
+      const logInterval = 1000 / settings.logFrameRate;
+      if (newTime % logInterval < deltaTime) {
+        logDataPoint(
+          timestamp,
+          targetPose,
+          targetPose,
+          'execution',
+          currentPoseIndexRef.current,
+          poseSequenceRef.current[currentPoseIndexRef.current]
+        );
+      }
+    } else if (currentPhase === 'returnCue') {
+      // Interpolate from target → neutral
+      const interpolatedPose = interpolatePoses(
+        targetJointAnglesRef.current,
+        neutralPose,
+        progress,
+        settings.interpolationType
+      );
+      setCurrentJointAngles(interpolatedPose);
+      currentJointAnglesRef.current = interpolatedPose;
+      
+      // Log at specified frame rate
+      const logInterval = 1000 / settings.logFrameRate;
+      if (newTime % logInterval < deltaTime) {
+        logDataPoint(
+          timestamp,
+          interpolatedPose,
+          neutralPose,
+          'returnCue',
           currentPoseIndexRef.current,
           poseSequenceRef.current[currentPoseIndexRef.current]
         );
       }
     } else if (currentPhase === 'rest') {
-      // Log at specified frame rate during rest
+      // Hold neutral
+      setCurrentJointAngles(neutralPose);
+      currentJointAnglesRef.current = neutralPose;
+      
+      // Log at specified frame rate
       const logInterval = 1000 / settings.logFrameRate;
       if (newTime % logInterval < deltaTime) {
         logDataPoint(
           timestamp,
-          currentJointAnglesRef.current,
-          targetJointAnglesRef.current,
+          neutralPose,
+          neutralPose,
           'rest',
           currentPoseIndexRef.current,
           poseSequenceRef.current[currentPoseIndexRef.current]
@@ -185,8 +276,17 @@ const ContinuousMotionMode = () => {
     
     // Check for phase transition
     if (newTime >= currentPhaseDuration) {
-      if (currentPhase === 'rest') {
-        // Move to transition phase with next target
+      const currentPhaseIdx = PHASE_ORDER.indexOf(currentPhase);
+      
+      if (currentPhaseIdx < PHASE_ORDER.length - 1) {
+        // Move to next phase within this trial
+        const nextPhase = PHASE_ORDER[currentPhaseIdx + 1];
+        setPhase(nextPhase);
+        phaseRef.current = nextPhase;
+        timeInPhaseRef.current = 0;
+        setTimeInPhase(0);
+      } else {
+        // Trial complete (rest finished) – advance to next target
         const nextIndex = currentPoseIndexRef.current + 1;
         
         if (nextIndex >= poseSequenceRef.current.length) {
@@ -195,22 +295,14 @@ const ContinuousMotionMode = () => {
           return;
         }
         
-        previousPoseRef.current = { ...currentJointAnglesRef.current };
+        // Set up next trial
         const nextTarget = getPose(poseSequenceRef.current[nextIndex]);
         setTargetJointAngles(nextTarget);
         targetJointAnglesRef.current = nextTarget;
         setCurrentPoseIndex(nextIndex);
         currentPoseIndexRef.current = nextIndex;
-        setPhase('transition');
-        phaseRef.current = 'transition';
-        timeInPhaseRef.current = 0;
-        setTimeInPhase(0);
-      } else {
-        // Transition complete, enter rest phase
-        const finalPose = { ...targetJointAnglesRef.current };
-        setCurrentJointAngles(finalPose);
-        currentJointAnglesRef.current = finalPose;
-        previousPoseRef.current = finalPose;
+        
+        // Start next trial at 'rest'
         setPhase('rest');
         phaseRef.current = 'rest';
         timeInPhaseRef.current = 0;
@@ -219,7 +311,7 @@ const ContinuousMotionMode = () => {
     }
     
     animationFrameRef.current = requestAnimationFrame(animate);
-  }, [settings, logDataPoint]);
+  }, [settings, logDataPoint, getPhaseDuration]);
 
   // Start/stop animation loop
   useEffect(() => {
@@ -253,6 +345,14 @@ const ContinuousMotionMode = () => {
     if (!sessionStarted) {
       setSessionStarted(true);
       setDataLog([]);
+      // Set the first target and begin with the rest phase
+      const firstTarget = getPose(poseSequence[0] || 'neutral');
+      setTargetJointAngles(firstTarget);
+      targetJointAnglesRef.current = firstTarget;
+      setCurrentJointAngles(getPose('neutral'));
+      currentJointAnglesRef.current = getPose('neutral');
+      setPhase('rest');
+      phaseRef.current = 'rest';
     }
     setIsRunning(true);
     setIsPaused(false);
@@ -342,8 +442,10 @@ const ContinuousMotionMode = () => {
   };
 
   const currentPoseName = poseSequence[currentPoseIndex] || 'neutral';
-  const totalDuration = (settings.restDuration + settings.transitionDuration) * settings.numTargets;
-  const elapsedTime = currentPoseIndex * cycleDuration + timeInPhase + (phase === 'transition' ? settings.restDuration : 0);
+  const totalDuration = cycleDuration * settings.numTargets;
+  const phaseIdx = PHASE_ORDER.indexOf(phase);
+  const elapsedInTrial = PHASE_ORDER.slice(0, phaseIdx).reduce((sum, p) => sum + getPhaseDuration(p), 0) + timeInPhase;
+  const elapsedTime = currentPoseIndex * cycleDuration + elapsedInTrial;
   const progressPercent = (elapsedTime / totalDuration) * 100;
 
   return (
@@ -357,8 +459,8 @@ const ContinuousMotionMode = () => {
                 Continuous Motion Data Collection
               </h1>
               <p className="text-gray-600">
-                Track continuous finger movements: {settings.numTargets} target poses | 
-                Rest: {settings.restDuration}ms → Transition: {settings.transitionDuration}ms
+                Trial-based paradigm: {settings.numTargets} trials | 
+                Prep: {settings.preparationDuration}ms → Execute: {settings.executionDuration}ms → Return: {settings.returnCueDuration}ms → Rest: {settings.restDuration}ms
               </p>
             </div>
             <button
@@ -375,6 +477,36 @@ const ContinuousMotionMode = () => {
               <h3 className="font-semibold text-gray-700 mb-3">Session Settings</h3>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div>
+                  <label className="block text-sm text-gray-600 mb-1">Preparation Cue (ms)</label>
+                  <input
+                    type="number"
+                    value={settings.preparationDuration}
+                    onChange={(e) => setSettings(s => ({ ...s, preparationDuration: parseInt(e.target.value) || 1000 }))}
+                    disabled={sessionStarted}
+                    className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Execution Hold (ms)</label>
+                  <input
+                    type="number"
+                    value={settings.executionDuration}
+                    onChange={(e) => setSettings(s => ({ ...s, executionDuration: parseInt(e.target.value) || 4000 }))}
+                    disabled={sessionStarted}
+                    className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Return Cue (ms)</label>
+                  <input
+                    type="number"
+                    value={settings.returnCueDuration}
+                    onChange={(e) => setSettings(s => ({ ...s, returnCueDuration: parseInt(e.target.value) || 500 }))}
+                    disabled={sessionStarted}
+                    className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
+                  />
+                </div>
+                <div>
                   <label className="block text-sm text-gray-600 mb-1">Rest Duration (ms)</label>
                   <input
                     type="number"
@@ -384,18 +516,10 @@ const ContinuousMotionMode = () => {
                     className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
                   />
                 </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3">
                 <div>
-                  <label className="block text-sm text-gray-600 mb-1">Transition Duration (ms)</label>
-                  <input
-                    type="number"
-                    value={settings.transitionDuration}
-                    onChange={(e) => setSettings(s => ({ ...s, transitionDuration: parseInt(e.target.value) || 1200 }))}
-                    disabled={sessionStarted}
-                    className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">Number of Targets</label>
+                  <label className="block text-sm text-gray-600 mb-1">Number of Trials</label>
                   <input
                     type="number"
                     value={settings.numTargets}
@@ -493,14 +617,14 @@ const ContinuousMotionMode = () => {
           {/* Progress indicators */}
           <div className="grid grid-cols-4 gap-4 mb-4">
             <div className="bg-gray-50 p-4 rounded-lg">
-              <div className="text-sm text-gray-600 mb-1">Target</div>
+              <div className="text-sm text-gray-600 mb-1">Trial</div>
               <div className="text-2xl font-bold text-gray-800">
                 {currentPoseIndex + 1} / {poseSequence.length}
               </div>
             </div>
             
             <div className="bg-gray-50 p-4 rounded-lg">
-              <div className="text-sm text-gray-600 mb-1">Current Pose</div>
+              <div className="text-sm text-gray-600 mb-1">Target Pose</div>
               <div className="text-xl font-bold text-gray-800 capitalize">
                 {HAND_POSES[currentPoseName]?.name || currentPoseName}
               </div>
@@ -508,8 +632,13 @@ const ContinuousMotionMode = () => {
             
             <div className="bg-gray-50 p-4 rounded-lg">
               <div className="text-sm text-gray-600 mb-1">Phase</div>
-              <div className={`text-2xl font-bold capitalize ${phase === 'transition' ? 'text-blue-600' : 'text-green-600'}`}>
-                {phase}
+              <div className={`text-lg font-bold capitalize ${
+                phase === 'preparation' ? 'text-blue-600' :
+                phase === 'execution' ? 'text-green-600' :
+                phase === 'returnCue' ? 'text-purple-600' :
+                'text-gray-600'
+              }`}>
+                {phase === 'returnCue' ? 'Return' : phase}
               </div>
             </div>
             
@@ -526,26 +655,26 @@ const ContinuousMotionMode = () => {
         {/* Main visualization area - Split screen when camera enabled */}
         <div className={`flex gap-4 ${cameraEnabled ? 'flex-row' : 'flex-col'}`}>
           {/* Virtual Hand View */}
-          <div className={`relative bg-gradient-to-b ${phase === 'transition' ? 'from-blue-50 to-blue-100' : 'from-green-50 to-green-100'} rounded-lg shadow-lg transition-colors duration-500 ${cameraEnabled ? 'flex-1' : 'w-full'}`}
+          <div className={`relative bg-gradient-to-b ${PHASE_BG[phase] || 'from-gray-50 to-gray-100'} rounded-lg shadow-lg transition-colors duration-500 ${cameraEnabled ? 'flex-1' : 'w-full'}`}
                style={{ height: '550px' }}>
             
             {/* Phase indicator */}
             <div className="absolute top-4 left-4 z-10">
-              <div className={`px-4 py-2 rounded-full text-white font-semibold ${phase === 'transition' ? 'bg-blue-500' : 'bg-green-500'}`}>
-                {phase === 'transition' ? '🎯 Moving to target...' : '✋ Hold pose'}
+              <div className={`px-4 py-2 rounded-full text-white font-semibold ${PHASE_COLORS[phase] || 'bg-gray-500'}`}>
+                {PHASE_LABELS[phase] || phase}
               </div>
             </div>
 
             {/* Time display */}
             <div className="absolute top-4 right-4 text-right z-10">
               <div className="text-sm text-gray-600 mb-1">
-                {phase === 'rest' ? 'Hold Time' : 'Transition Time'}
+                {phase === 'preparation' ? 'Cue Time' :
+                 phase === 'execution' ? 'Hold Time' :
+                 phase === 'returnCue' ? 'Return Time' :
+                 'Rest Time'}
               </div>
               <div className="text-4xl font-bold text-gray-800">
-                {phase === 'rest' 
-                  ? `${((settings.restDuration - timeInPhase) / 1000).toFixed(1)}s`
-                  : `${((settings.transitionDuration - timeInPhase) / 1000).toFixed(1)}s`
-                }
+                {((getPhaseDuration(phase) - timeInPhase) / 1000).toFixed(1)}s
               </div>
             </div>
 
@@ -555,7 +684,7 @@ const ContinuousMotionMode = () => {
                 {/* 3D Shadow Robot Hand */}
                 <ShadowHand3D 
                   jointAngles={currentJointAngles}
-                  targetJointAngles={settings.showTargetHand && phase === 'transition' ? targetJointAngles : null}
+                  targetJointAngles={settings.showTargetHand && (phase === 'preparation' || phase === 'execution') ? targetJointAngles : null}
                   isGhost={false}
                   showLabels={true}
                   scale={cameraEnabled ? 0.85 : 1}
@@ -564,7 +693,8 @@ const ContinuousMotionMode = () => {
               </div>
             </div>
 
-            {/* Target pose name */}
+            {/* Target pose name - only during preparation and execution */}
+            {(phase === 'preparation' || phase === 'execution') && (
             <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2">
               <div className="text-center">
                 <div className="text-sm text-gray-600 mb-1">Target Pose</div>
@@ -576,6 +706,7 @@ const ContinuousMotionMode = () => {
                 </div>
               </div>
             </div>
+            )}
 
             {/* Status overlays */}
             {!isRunning && !sessionStarted && (
