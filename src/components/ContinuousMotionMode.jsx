@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Pause, RotateCcw, Download, Settings, Camera } from 'lucide-react';
 import ShadowHand3D from './ShadowHand3D';
 import CameraRecorder from './CameraRecorder';
-import { HAND_POSES, getPose, generatePoseSequence, poseToLabeledObject, POSE_NAMES } from '../utils/handPoses';
+import { HAND_POSES, getPose, generatePoseSequence, POSE_NAMES } from '../utils/handPoses';
 import { interpolatePoses } from '../utils/interpolation';
 
 /**
@@ -57,8 +57,7 @@ const ContinuousMotionMode = () => {
   const [phaseProgress, setPhaseProgress] = useState(0); // 0-1 progress within phase
   const [timeInPhase, setTimeInPhase] = useState(0);
   
-  // Data logging
-  const [dataLog, setDataLog] = useState([]);
+  // Session timing
   const sessionStartTimeRef = useRef(null);
   
   // Animation refs - use refs for values that need to be read in animation loop
@@ -88,7 +87,6 @@ const ContinuousMotionMode = () => {
     numTargets: 50,
     interpolationType: 'minimumJerk',
     showTargetHand: true,
-    logFrameRate: 30, // Hz for logging
     colorMiddleRing: false // Color middle and ring fingers
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -125,44 +123,46 @@ const ContinuousMotionMode = () => {
     return POSE_NAMES.filter(name => enabledPoses[name]);
   }, [enabledPoses]);
   
-  // Initialize pose sequence — target poses randomly selected from enabled poses
+  // Initialize pose sequence — balanced: each pose occurs equally, order is random
   useEffect(() => {
     if (!sessionStarted) {
       const availablePoses = getEnabledPoseNames();
       const pool = availablePoses.length > 0 ? availablePoses : POSE_NAMES;
-      // Generate numTargets+1 with a dummy start so the algorithm has a
-      // "previous" pose for its distance logic, then drop the dummy.
-      const raw = generatePoseSequence(settings.numTargets + 1, {
-        startPose: pool[Math.floor(Math.random() * pool.length)],
-        occasionalLargeJump: true,
-        largeJumpProbability: 0.12,
-        allowedPoses: pool
-      });
-      const sequence = raw.slice(0, settings.numTargets);
-      setPoseSequence(sequence);
+
+      // Build balanced sequence using shuffled blocks.
+      // Each block contains every enabled pose exactly once, shuffled.
+      // Repeat blocks until we reach numTargets.
+      const shuffle = (arr) => {
+        const a = [...arr];
+        for (let i = a.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+      };
+
+      const sequence = [];
+      while (sequence.length < settings.numTargets) {
+        let block = shuffle(pool);
+        // Avoid repeating the same pose across block boundaries
+        if (sequence.length > 0 && block[0] === sequence[sequence.length - 1]) {
+          // Swap first element with a random later element
+          const swapIdx = 1 + Math.floor(Math.random() * (block.length - 1));
+          [block[0], block[swapIdx]] = [block[swapIdx], block[0]];
+        }
+        sequence.push(...block);
+      }
+      // Trim to exact count
+      const finalSequence = sequence.slice(0, settings.numTargets);
+      setPoseSequence(finalSequence);
       
       // Hand starts at neutral (rest), first target will be shown during preparation
       const neutralPose = getPose('neutral');
       setCurrentJointAngles(neutralPose);
-      setTargetJointAngles(getPose(sequence[0]));
+      setTargetJointAngles(getPose(finalSequence[0]));
       previousPoseRef.current = neutralPose;
     }
   }, [sessionStarted, settings.numTargets, getEnabledPoseNames]);
-
-  // Log data point
-  const logDataPoint = useCallback((timestamp, currentPose, targetPose, phaseName, poseIndex, targetPoseName) => {
-    const dataPoint = {
-      timestamp: timestamp,
-      sessionTime: timestamp - sessionStartTimeRef.current,
-      phase: phaseName,
-      poseIndex: poseIndex,
-      targetPoseName: targetPoseName,
-      current: poseToLabeledObject(currentPose),
-      target: poseToLabeledObject(targetPose)
-    };
-    
-    setDataLog(prev => [...prev, dataPoint]);
-  }, []);
 
   // Main animation loop - uses refs to avoid stale closures
   const animate = useCallback((timestamp) => {
@@ -200,37 +200,11 @@ const ContinuousMotionMode = () => {
       );
       setCurrentJointAngles(interpolatedPose);
       currentJointAnglesRef.current = interpolatedPose;
-      
-      // Log at specified frame rate
-      const logInterval = 1000 / settings.logFrameRate;
-      if (newTime % logInterval < deltaTime) {
-        logDataPoint(
-          timestamp,
-          interpolatedPose,
-          targetJointAnglesRef.current,
-          'preparation',
-          currentPoseIndexRef.current,
-          poseSequenceRef.current[currentPoseIndexRef.current]
-        );
-      }
     } else if (currentPhase === 'execution') {
       // Hold the target pose (hand stays at target so user can mirror it)
       const targetPose = targetJointAnglesRef.current;
       setCurrentJointAngles(targetPose);
       currentJointAnglesRef.current = targetPose;
-      
-      // Log at specified frame rate
-      const logInterval = 1000 / settings.logFrameRate;
-      if (newTime % logInterval < deltaTime) {
-        logDataPoint(
-          timestamp,
-          targetPose,
-          targetPose,
-          'execution',
-          currentPoseIndexRef.current,
-          poseSequenceRef.current[currentPoseIndexRef.current]
-        );
-      }
     } else if (currentPhase === 'returnCue') {
       // Interpolate from target → neutral
       const interpolatedPose = interpolatePoses(
@@ -241,36 +215,10 @@ const ContinuousMotionMode = () => {
       );
       setCurrentJointAngles(interpolatedPose);
       currentJointAnglesRef.current = interpolatedPose;
-      
-      // Log at specified frame rate
-      const logInterval = 1000 / settings.logFrameRate;
-      if (newTime % logInterval < deltaTime) {
-        logDataPoint(
-          timestamp,
-          interpolatedPose,
-          neutralPose,
-          'returnCue',
-          currentPoseIndexRef.current,
-          poseSequenceRef.current[currentPoseIndexRef.current]
-        );
-      }
     } else if (currentPhase === 'rest') {
       // Hold neutral
       setCurrentJointAngles(neutralPose);
       currentJointAnglesRef.current = neutralPose;
-      
-      // Log at specified frame rate
-      const logInterval = 1000 / settings.logFrameRate;
-      if (newTime % logInterval < deltaTime) {
-        logDataPoint(
-          timestamp,
-          neutralPose,
-          neutralPose,
-          'rest',
-          currentPoseIndexRef.current,
-          poseSequenceRef.current[currentPoseIndexRef.current]
-        );
-      }
     }
     
     // Check for phase transition
@@ -310,7 +258,7 @@ const ContinuousMotionMode = () => {
     }
     
     animationFrameRef.current = requestAnimationFrame(animate);
-  }, [settings, logDataPoint, getPhaseDuration]);
+  }, [settings, getPhaseDuration]);
 
   // Start/stop animation loop
   useEffect(() => {
@@ -337,13 +285,12 @@ const ContinuousMotionMode = () => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
-    alert('Session complete! Download the kinematic data.');
+    alert('Session complete!');
   };
 
   const startSession = () => {
     if (!sessionStarted) {
       setSessionStarted(true);
-      setDataLog([]);
       // Set the first target and begin with the rest phase
       const firstTarget = getPose(poseSequence[0] || 'neutral');
       setTargetJointAngles(firstTarget);
@@ -373,7 +320,6 @@ const ContinuousMotionMode = () => {
     setPhaseProgress(0);
     setTimeInPhase(0);
     setSessionStarted(false);
-    setDataLog([]);
     
     const initialPose = getPose('neutral');
     setCurrentJointAngles(initialPose);
@@ -386,45 +332,6 @@ const ContinuousMotionMode = () => {
     if (cameraRecorderRef.current) {
       cameraRecorderRef.current.reset();
     }
-  };
-
-  const downloadData = () => {
-    // Create CSV content
-    const headers = [
-      'timestamp', 'session_time_ms', 'phase', 'pose_index', 'target_pose_name',
-      'current_thumb_cmc', 'current_thumb_mcp', 'current_thumb_ip',
-      'current_index_mcp', 'current_index_pip', 'current_index_dip',
-      'current_pinky_mcp', 'current_pinky_pip', 'current_pinky_dip',
-      'target_thumb_cmc', 'target_thumb_mcp', 'target_thumb_ip',
-      'target_index_mcp', 'target_index_pip', 'target_index_dip',
-      'target_pinky_mcp', 'target_pinky_pip', 'target_pinky_dip'
-    ];
-    
-    const rows = dataLog.map(d => [
-      d.timestamp,
-      d.sessionTime,
-      d.phase,
-      d.poseIndex,
-      d.targetPoseName,
-      d.current.thumb_cmc, d.current.thumb_mcp, d.current.thumb_ip,
-      d.current.index_mcp, d.current.index_pip, d.current.index_dip,
-      d.current.pinky_mcp, d.current.pinky_pip, d.current.pinky_dip,
-      d.target.thumb_cmc, d.target.thumb_mcp, d.target.thumb_ip,
-      d.target.index_mcp, d.target.index_pip, d.target.index_dip,
-      d.target.pinky_mcp, d.target.pinky_pip, d.target.pinky_dip
-    ].join(','));
-    
-    const csvContent = [headers.join(','), ...rows].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `continuous_motion_data_${new Date().getTime()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   };
 
   const downloadSequence = () => {
@@ -527,16 +434,6 @@ const ContinuousMotionMode = () => {
                     className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">Log Frame Rate (Hz)</label>
-                  <input
-                    type="number"
-                    value={settings.logFrameRate}
-                    onChange={(e) => setSettings(s => ({ ...s, logFrameRate: parseInt(e.target.value) || 30 }))}
-                    disabled={sessionStarted}
-                    className="w-full px-3 py-2 border rounded-lg disabled:bg-gray-200"
-                  />
-                </div>
               </div>
               <div className="mt-3">
                 <label className="flex items-center gap-2">
@@ -578,15 +475,6 @@ const ContinuousMotionMode = () => {
             >
               <RotateCcw size={20} />
               Reset
-            </button>
-            
-            <button
-              onClick={downloadData}
-              disabled={dataLog.length === 0}
-              className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
-            >
-              <Download size={20} />
-              Download Data
             </button>
             
             <button
@@ -642,9 +530,9 @@ const ContinuousMotionMode = () => {
             </div>
             
             <div className="bg-gray-50 p-4 rounded-lg">
-              <div className="text-sm text-gray-600 mb-1">Data Points</div>
+              <div className="text-sm text-gray-600 mb-1">Elapsed</div>
               <div className="text-2xl font-bold text-gray-800">
-                {dataLog.length}
+                {(elapsedTime / 1000).toFixed(1)}s
               </div>
             </div>
           </div>

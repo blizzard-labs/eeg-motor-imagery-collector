@@ -59,10 +59,11 @@ const CameraRecorder = forwardRef(({
   const cameraReadyRef = useRef(false);
   const recordedChunksRef = useRef([]);
   
+  // Throttled frame count for UI display (avoid re-renders every frame)
+  const [trackedFrameCount, setTrackedFrameCount] = useState(0);
+  const frameCountIntervalRef = useRef(null);
+  
   // Keep refs in sync
-  useEffect(() => {
-    handTrackingLogRef.current = handTrackingLog;
-  }, [handTrackingLog]);
   useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
@@ -94,6 +95,11 @@ const CameraRecorder = forwardRef(({
       rawRecordedChunksRef.current = [];
       setHandTrackingLog([]);
       handTrackingLogRef.current = [];
+      setTrackedFrameCount(0);
+      if (frameCountIntervalRef.current) {
+        clearInterval(frameCountIntervalRef.current);
+        frameCountIntervalRef.current = null;
+      }
     }
   }));
   
@@ -164,8 +170,7 @@ const CameraRecorder = forwardRef(({
               }))
             };
             
-            handTrackingLogRef.current = [...handTrackingLogRef.current, logEntry];
-            setHandTrackingLog(handTrackingLogRef.current);
+            handTrackingLogRef.current.push(logEntry);
             
             if (onHandDataRef.current) {
               onHandDataRef.current(landmarks, timestamp);
@@ -307,6 +312,11 @@ const CameraRecorder = forwardRef(({
       cancelAnimationFrame(animationFrameRef.current);
     }
     
+    if (frameCountIntervalRef.current) {
+      clearInterval(frameCountIntervalRef.current);
+      frameCountIntervalRef.current = null;
+    }
+    
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
@@ -385,7 +395,7 @@ const CameraRecorder = forwardRef(({
       
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
-          recordedChunksRef.current = [...recordedChunksRef.current, e.data];
+          recordedChunksRef.current.push(e.data);
         }
       };
       
@@ -404,7 +414,7 @@ const CameraRecorder = forwardRef(({
         
         rawRecorder.ondataavailable = (e) => {
           if (e.data.size > 0) {
-            rawRecordedChunksRef.current = [...rawRecordedChunksRef.current, e.data];
+            rawRecordedChunksRef.current.push(e.data);
           }
         };
         
@@ -424,6 +434,12 @@ const CameraRecorder = forwardRef(({
       handTrackingLogRef.current = [];
       recordedChunksRef.current = [];
       rawRecordedChunksRef.current = [];
+      setTrackedFrameCount(0);
+      
+      // Update UI frame count every 2 seconds (not every frame)
+      frameCountIntervalRef.current = setInterval(() => {
+        setTrackedFrameCount(handTrackingLogRef.current.length);
+      }, 2000);
     } catch (err) {
       console.error('Recording error:', err);
       setError('Failed to start recording');
@@ -440,6 +456,17 @@ const CameraRecorder = forwardRef(({
     }
     setIsRecording(false);
     isRecordingRef.current = false;
+    
+    // Stop the UI update interval and sync final counts
+    if (frameCountIntervalRef.current) {
+      clearInterval(frameCountIntervalRef.current);
+      frameCountIntervalRef.current = null;
+    }
+    // Sync state from refs for download UI
+    setRecordedChunks([...recordedChunksRef.current]);
+    setRawRecordedChunks([...rawRecordedChunksRef.current]);
+    setHandTrackingLog(handTrackingLogRef.current);
+    setTrackedFrameCount(handTrackingLogRef.current.length);
   }, []);
   
   // Download video (with overlay)
@@ -617,7 +644,7 @@ const CameraRecorder = forwardRef(({
           
           {/* Data counts */}
           <div className="absolute bottom-2 right-2 text-white text-xs bg-black/50 px-2 py-1 rounded">
-            {handTrackingLog.length} frames tracked
+            {trackedFrameCount} frames tracked
           </div>
         </div>
       )}

@@ -49,6 +49,9 @@ const PeriodicMotionMode = () => {
   
   // Data logging
   const [dataLog, setDataLog] = useState([]);
+  const dataLogRef = useRef([]);
+  const [dataPointCount, setDataPointCount] = useState(0);
+  const dataLogIntervalRef = useRef(null);
   const sessionStartTimeRef = useRef(null);
   
   // Animation refs
@@ -149,19 +152,35 @@ const PeriodicMotionMode = () => {
     }
   }, [audioEnabled]);
   
-  // Generate trial sequence (list of random pose names from enabled poses)
+  // Generate trial sequence — balanced: each pose occurs equally, order is random
   const generateTrialSequence = useCallback((numTrials, enabledPosesList) => {
     const availablePoses = enabledPosesList.length > 0 
       ? enabledPosesList 
       : POSE_NAMES;
+
+    // Build balanced sequence using shuffled blocks.
+    // Each block contains every enabled pose exactly once, shuffled.
+    const shuffle = (arr) => {
+      const a = [...arr];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    };
+
     const sequence = [];
-    
-    for (let i = 0; i < numTrials; i++) {
-      const randomIndex = Math.floor(Math.random() * availablePoses.length);
-      sequence.push(availablePoses[randomIndex]);
+    while (sequence.length < numTrials) {
+      let block = shuffle(availablePoses);
+      // Avoid repeating the same pose across block boundaries
+      if (sequence.length > 0 && block.length > 1 && block[0] === sequence[sequence.length - 1]) {
+        const swapIdx = 1 + Math.floor(Math.random() * (block.length - 1));
+        [block[0], block[swapIdx]] = [block[swapIdx], block[0]];
+      }
+      sequence.push(...block);
     }
-    
-    return sequence;
+
+    return sequence.slice(0, numTrials);
   }, []);
   
   // Initialize trial sequence
@@ -192,7 +211,7 @@ const PeriodicMotionMode = () => {
       target: poseToLabeledObject(targetPose)
     };
     
-    setDataLog(prev => [...prev, dataPoint]);
+    dataLogRef.current.push(dataPoint);
   }, []);
 
   // Main animation loop
@@ -366,13 +385,28 @@ const PeriodicMotionMode = () => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
+    // Sync ref data to state for download
+    if (dataLogIntervalRef.current) {
+      clearInterval(dataLogIntervalRef.current);
+      dataLogIntervalRef.current = null;
+    }
+    setDataLog([...dataLogRef.current]);
+    setDataPointCount(dataLogRef.current.length);
     alert('Session complete! Download the kinematic data.');
   };
 
   const startSession = () => {
     if (!sessionStarted) {
       setSessionStarted(true);
+      dataLogRef.current = [];
       setDataLog([]);
+      setDataPointCount(0);
+      
+      // Start throttled UI update interval
+      if (dataLogIntervalRef.current) clearInterval(dataLogIntervalRef.current);
+      dataLogIntervalRef.current = setInterval(() => {
+        setDataPointCount(dataLogRef.current.length);
+      }, 2000);
       
       // Initialize audio context on user interaction
       if (!audioContextRef.current && audioEnabled) {
@@ -391,6 +425,10 @@ const PeriodicMotionMode = () => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
+    if (dataLogIntervalRef.current) {
+      clearInterval(dataLogIntervalRef.current);
+      dataLogIntervalRef.current = null;
+    }
     
     setIsRunning(false);
     setIsPaused(false);
@@ -402,6 +440,8 @@ const PeriodicMotionMode = () => {
     setTransitionProgress(0);
     setSessionStarted(false);
     setDataLog([]);
+    dataLogRef.current = [];
+    setDataPointCount(0);
     
     const initialPose = getPose('neutral');
     setCurrentJointAngles(initialPose);
@@ -429,7 +469,7 @@ const PeriodicMotionMode = () => {
       'target_pinky_mcp', 'target_pinky_pip', 'target_pinky_dip'
     ];
     
-    const rows = dataLog.map(d => [
+    const rows = dataLogRef.current.map(d => [
       d.timestamp,
       d.sessionTime,
       d.phase,
@@ -623,7 +663,7 @@ const PeriodicMotionMode = () => {
             
             <button
               onClick={downloadData}
-              disabled={dataLog.length === 0}
+              disabled={dataPointCount === 0}
               className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition"
             >
               <Download size={20} />
@@ -686,7 +726,7 @@ const PeriodicMotionMode = () => {
             <div className="bg-gray-50 p-4 rounded-lg">
               <div className="text-sm text-gray-600 mb-1">Data Points</div>
               <div className="text-2xl font-bold text-gray-800">
-                {dataLog.length}
+                {dataPointCount}
               </div>
             </div>
           </div>
